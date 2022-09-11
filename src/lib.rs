@@ -89,6 +89,7 @@ mod impl_serde;
 #[cfg(feature = "zeroize")]
 mod impl_zeroize;
 
+use core::cell::{Cell, RefCell, UnsafeCell};
 use core::iter::FromIterator;
 use core::marker::PhantomData;
 use core::mem::{MaybeUninit, ManuallyDrop};
@@ -118,6 +119,100 @@ unsafe impl<T> ArrayLength<T> for UTerm {
     type ArrayType = [T; 0];
 }
 
+/// Trait providing access to a constant value of the `Self` type.
+/// 
+/// The following implementations are provided:
+/// * for numerics (integers and floats), value of zero
+/// * for [`bool`], value of `false`
+/// * for [`char`], value of the null-character `'\0'`
+/// * for slices (including of [`str`]), value of the empty slice `&[]` (or empty string `""`)
+/// * for raw pointers, a null pointer
+/// * for tuples of up to 10 elements and arrays of any length (where element type implements
+///   `ConstDefault`), the tuple/array of `DEFAULT`s
+/// 
+/// ```rust
+/// # use generic_array::{
+/// #   ConstDefault,
+/// #   GenericArray,
+/// #   typenum::U5,
+/// # };
+/// use std::f32::consts::PI;
+/// 
+/// #[derive(Debug, PartialEq)]
+/// struct Food(f32);
+/// 
+/// impl ConstDefault for Food {
+///     const DEFAULT: Self = Self(PI);
+/// }
+/// 
+/// const BUFFET: GenericArray<Food, U5> = GenericArray::DEFAULT;
+/// assert_eq!(BUFFET[3], Food(PI));
+/// ```
+pub trait ConstDefault: Sized {
+    /// The constant value of the `Self` type distinguished by the type parameter `X`
+    const DEFAULT: Self;
+}
+
+macro_rules! const_value {
+    () => {};
+    (tuple: $($param:ident),*;) => {
+        impl<$($param: ConstDefault),*> ConstDefault for ($($param,)*) {
+            const DEFAULT: Self = ($($param::DEFAULT,)*);
+        }
+    };
+    (tuples:; $($rest:tt)*) => {
+        const_value!(tuple:;);
+        const_value!($($rest)*);
+    };
+    (tuples: $head:ident $(,$tail:ident)*; $($rest:tt)*) => {
+        const_value!(tuple: $head $(,$tail)*;);
+        const_value!(tuples: $($tail),*; $($rest)*);
+    };
+    ($v:expr => $($t:ty),+; $($rest:tt)*) => {
+        $(impl ConstDefault for $t {
+            const DEFAULT: Self = $v;
+        })+
+        const_value!($($rest)*);
+    };
+}
+
+const_value! {
+    0 => i8, u8, i16, u16, i32, u32, i64, u64, i128, u128, isize, usize;
+    0. => f32, f64;
+    false => bool;
+    '\0' => char;
+    "" => &str;
+    tuples: A, B, C, D, E, F, G, H, I, J;
+}
+
+impl<T: 'static> ConstDefault for &[T] {
+    const DEFAULT: Self = &[];
+}
+
+impl<T: ConstDefault, const N: usize> ConstDefault for [T; N] {
+    const DEFAULT: Self = [T::DEFAULT; N];
+}
+
+impl<T> ConstDefault for *const T {
+    const DEFAULT: Self = core::ptr::null();
+}
+
+impl<T> ConstDefault for *mut T {
+    const DEFAULT: Self = core::ptr::null_mut();
+}
+
+impl<T: ConstDefault> ConstDefault for Cell<T> {
+    const DEFAULT: Self = Self::new(T::DEFAULT);
+}
+
+impl<T: ConstDefault> ConstDefault for RefCell<T> {
+    const DEFAULT: Self = Self::new(T::DEFAULT);
+}
+
+impl<T: ConstDefault> ConstDefault for UnsafeCell<T> {
+    const DEFAULT: Self = Self::new(T::DEFAULT);
+}
+
 /// Internal type used to generate a struct of appropriate size
 #[allow(dead_code)]
 #[repr(C)]
@@ -126,6 +221,14 @@ pub struct GenericArrayImplEven<T, U> {
     parent1: U,
     parent2: U,
     _marker: PhantomData<T>,
+}
+
+impl<T, U: ConstDefault> ConstDefault for GenericArrayImplEven<T, U> {
+    const DEFAULT: Self = Self {
+        parent1: U::DEFAULT,
+        parent2: U::DEFAULT,
+        _marker: PhantomData,
+    };
 }
 
 impl<T: Clone, U: Clone> Clone for GenericArrayImplEven<T, U> {
@@ -148,6 +251,14 @@ pub struct GenericArrayImplOdd<T, U> {
     parent1: U,
     parent2: U,
     data: T,
+}
+
+impl<T: ConstDefault, U: ConstDefault> ConstDefault for GenericArrayImplOdd<T, U> {
+    const DEFAULT: Self = Self {
+        parent1: U::DEFAULT,
+        parent2: U::DEFAULT,
+        data: T::DEFAULT,
+    };
 }
 
 impl<T: Clone, U: Clone> Clone for GenericArrayImplOdd<T, U> {
@@ -177,6 +288,12 @@ unsafe impl<T, N: ArrayLength<T>> ArrayLength<T> for UInt<N, B1> {
 #[repr(transparent)]
 pub struct GenericArray<T, U: ArrayLength<T>> {
     data: U::ArrayType,
+}
+
+impl<T, U: ArrayLength<T>> ConstDefault for GenericArray<T, U>
+where U::ArrayType: ConstDefault,
+{
+    const DEFAULT: Self = Self { data: ConstDefault::DEFAULT };
 }
 
 unsafe impl<T: Send, N: ArrayLength<T>> Send for GenericArray<T, N> {}
